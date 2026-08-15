@@ -67,9 +67,9 @@ app.post('/initiate-payment', async (req, res) => {
 
     } catch (error) {
         console.error("Erreur LigdiCash:", error.response ? error.response.data : error.message);
-        res.status(500).json({ 
-            error: "Échec de l'initialisation", 
-            details: error.response ? error.response.data : error.message 
+        res.status(500).json({
+            error: "Échec de l'initialisation",
+            details: error.response ? error.response.data : error.message
         });
     }
 });
