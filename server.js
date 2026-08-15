@@ -5,68 +5,64 @@ const cors = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors()); // Autorise ton app Flutter à communiquer avec ce serveur
+app.use(cors()); 
 
-// Récupération des variables sécurisées
 const API_KEY = process.env.LIGDI_API_KEY;
 const API_TOKEN = process.env.LIGDI_API_TOKEN;
-const BASE_URL = process.env.LIGDI_BASE_URL;
 
-// 1. ROUTE POUR INITIER UN PAIEMENT (Appelée par ton app Flutter)
+// 1. ROUTE POUR INITIER UN PAIEMENT
 app.post('/initiate-payment', async (req, res) => {
     const { amount, phone, description, orderId } = req.body;
 
     if (!amount || !phone || !orderId) {
-        return res.status(400).json({ error: "Données manquantes (amount, phone, orderId)" });
+        return res.status(400).json({ error: "Données manquantes" });
     }
 
     try {
-        // Préparation des données selon la structure attendue par LigdiCash
+        // Payload envoyé à LigdiCash
         const payload = {
-            api_key: API_KEY,
             amount: parseInt(amount),
             currency: "XOF",
-            phone: phone, // Format: 223XXXXXXXX
+            phone: phone, 
             description: description,
             order_id: orderId,
-            callback_url: "https://ton-serveur-render.onrender.com/webhook" 
+            // Callback URL pour que LigdiCash nous prévienne quand c'est payé
+            callback_url: "https://ligdicash-api.onrender.com/webhook" 
         };
 
-        // Appel à l'API LigdiCash avec le Token dans l'en-tête
-        const response = await axios.post(`${BASE_URL}/payment/initiate`, payload, {
-            headers: {
-                'Authorization': `Bearer ${API_TOKEN}`,
-                'Content-Type': 'application/json'
+        // ✅ APPEL À LA VRAIE URL DE LIGDICASH
+        const response = await axios.post(
+            'https://app.ligdicash.com/pay/v01/straight/checkout-invoice/create', 
+            payload, 
+            {
+                headers: {
+                    'Apikey': API_KEY, // ✅ Clé API dans le header
+                    'Authorization': `Bearer ${API_TOKEN}`, // ✅ Token dans le header
+                    'Content-Type': 'application/json'
+                }
             }
-        });
+        );
 
-        // On renvoie la réponse (lien de paiement ou statut) à Flutter
         res.json(response.data);
 
     } catch (error) {
+        // On renvoie les détails de l'erreur pour pouvoir les lire dans Flutter
         console.error("Erreur LigdiCash:", error.response ? error.response.data : error.message);
-        res.status(500).json({ error: "Échec de l'initialisation du paiement" });
+        res.status(500).json({ 
+            error: "Échec de l'initialisation", 
+            details: error.response ? error.response.data : error.message 
+        });
     }
 });
 
-// 2. ROUTE WEBHOOK (LigdiCash appelle cette route quand le paiement est fait)
+// 2. ROUTE WEBHOOK (Pour recevoir les confirmations de paiement)
 app.post('/webhook', async (req, res) => {
-    const data = req.body;
-    console.log("🔔 Webhook reçu de LigdiCash:", data);
-
-    // Vérifie si le paiement est un succès (le champ peut varier selon leur doc: 'status', 'statut', 'code')
-    if (data.status === 'SUCCESS' || data.code === '00') {
-        console.log(`✅ Paiement confirmé pour la commande: ${data.order_id}`);
-        
-        // ICI: Plus tard, on mettra à jour Supabase/Firebase pour débloquer le cours
-    }
-
-    // Toujours répondre 200 OK pour confirmer la réception
+    console.log("🔔 Webhook reçu de LigdiCash:", req.body);
     res.status(200).send('OK');
 });
 
-// Démarrage du serveur
-const PORT = process.env.PORT || 3000;
+// Render utilise le port 10000 par défaut
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur LigdiCash actif sur le port ${PORT}`);
 });
