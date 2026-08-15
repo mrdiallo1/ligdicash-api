@@ -5,12 +5,12 @@ const cors = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors()); 
+app.use(cors());
 
 const API_KEY = process.env.LIGDI_API_KEY;
 const API_TOKEN = process.env.LIGDI_API_TOKEN;
 
-// 1. ROUTE POUR INITIER UN PAIEMENT
+// 1. ROUTE POUR INITIER UN PAIEMENT (Format officiel LigdiCash)
 app.post('/initiate-payment', async (req, res) => {
     const { amount, phone, description, orderId } = req.body;
 
@@ -19,25 +19,45 @@ app.post('/initiate-payment', async (req, res) => {
     }
 
     try {
-        // Payload envoyé à LigdiCash
+        // ✅ STRUCTURE OFFICIELLE EXIGÉE PAR LIGDICASH
         const payload = {
-            amount: parseInt(amount),
-            currency: "XOF",
-            phone: phone, 
-            description: description,
-            order_id: orderId,
-            // Callback URL pour que LigdiCash nous prévienne quand c'est payé
-            callback_url: "https://ligdicash-api.onrender.com/webhook" 
+            commande: {
+                invoice: {
+                    items: [],
+                    total_amount: parseInt(amount),
+                    devise: "XOF",
+                    description: description || "Abonnement SmartEduAfrica",
+                    customer: phone, // Format: 223XXXXXXXX
+                    customer_firstname: "Client",
+                    customer_lastname: "SmartEdu",
+                    customer_email: "client@smarteduafrica.com",
+                    external_id: orderId,
+                    otp: ""
+                },
+                store: {
+                    name: "SmartEduAfrica",
+                    website_url: "https://smarteduafrica.com"
+                },
+                actions: {
+                    cancel_url: "",
+                    return_url: "",
+                    callback_url: "https://ligdicash-api.onrender.com/webhook"
+                },
+                custom_data: {
+                    transaction_id: orderId
+                }
+            }
         };
 
-        // ✅ APPEL À LA VRAIE URL DE LIGDICASH
+        // ✅ Endpoint "Hosted payin" : ouvre la page de paiement LigdiCash
         const response = await axios.post(
-            'https://app.ligdicash.com/pay/v01/straight/checkout-invoice/create', 
-            payload, 
+            'https://app.ligdicash.com/pay/v01/redirect/checkout-invoice/create',
+            payload,
             {
                 headers: {
-                    'Apikey': API_KEY, // ✅ Clé API dans le header
-                    'Authorization': `Bearer ${API_TOKEN}`, // ✅ Token dans le header
+                    'Apikey': API_KEY,
+                    'Authorization': `Bearer ${API_TOKEN}`,
+                    'Accept': 'application/json',
                     'Content-Type': 'application/json'
                 }
             }
@@ -46,7 +66,6 @@ app.post('/initiate-payment', async (req, res) => {
         res.json(response.data);
 
     } catch (error) {
-        // On renvoie les détails de l'erreur pour pouvoir les lire dans Flutter
         console.error("Erreur LigdiCash:", error.response ? error.response.data : error.message);
         res.status(500).json({ 
             error: "Échec de l'initialisation", 
@@ -55,13 +74,12 @@ app.post('/initiate-payment', async (req, res) => {
     }
 });
 
-// 2. ROUTE WEBHOOK (Pour recevoir les confirmations de paiement)
+// 2. ROUTE WEBHOOK (confirmation automatique de paiement)
 app.post('/webhook', async (req, res) => {
-    console.log("🔔 Webhook reçu de LigdiCash:", req.body);
+    console.log("🔔 Webhook LigdiCash reçu:", JSON.stringify(req.body));
     res.status(200).send('OK');
 });
 
-// Render utilise le port 10000 par défaut
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`🚀 Serveur LigdiCash actif sur le port ${PORT}`);
