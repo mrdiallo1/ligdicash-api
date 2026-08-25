@@ -34,7 +34,7 @@ app.post('/initiate-payment', async (req, res) => {
                     total_amount: parseInt(amount),
                     devise: "XOF",
                     description: description || "Achat SmartEduAfrica",
-                    customer: phone,
+                    customer: "",  // ✅ VIDE ! (obligatoire selon support LigdiCash)
                     customer_firstname: "Client",
                     customer_lastname: "SmartEdu",
                     customer_email: "client@smarteduafrica.com",
