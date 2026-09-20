@@ -31,6 +31,37 @@ function extractCustom(custom, key) {
 }
 
 // ==========================================
+// ✅ HELPER : Formate un numéro au format LigdiCash
+// Format attendu : indicatif + numéro, sans '+' ni espaces
+// Exemple : "+226 70 00 00 00" → "22670000000"
+// ==========================================
+function formatPhoneNumber(phone) {
+    if (!phone) return '';
+    
+    // Enlever tous les espaces, tirets, parenthèses
+    let cleaned = phone.replace(/[\s\-\(\)]/g, '');
+    
+    // Enlever le '+' au début
+    if (cleaned.startsWith('+')) {
+        cleaned = cleaned.substring(1);
+    }
+    
+    // Si le numéro commence par '00', le remplacer par rien
+    // (ex: "00226..." → "226...")
+    if (cleaned.startsWith('00')) {
+        cleaned = cleaned.substring(2);
+    }
+    
+    // Si le numéro ne contient que des chiffres et commence par un 0 
+    // (format local burkinabè sans indicatif), ajouter 226
+    if (/^0[0-9]{7,8}$/.test(cleaned)) {
+        cleaned = '226' + cleaned.substring(1);
+    }
+    
+    return cleaned;
+}
+
+// ==========================================
 // 1. INITIER UN PAIEMENT (premium / library / group)
 // ==========================================
 app.post('/initiate-payment', async (req, res) => {
@@ -211,7 +242,11 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==========================================
-// 3. ✅ RETRAIT INSTANTANÉ (sans approbation admin)
+// 3. ✅ RETRAIT - PAYOUT MARCHAND (endpoint OFFICIEL LigdiCash)
+// ==========================================
+// Documentation : https://developers.ligdicash.com/api-paiement/payout/vers-mobile-money
+// Endpoint : POST /pay/v01/straight/payout
+// Délai : quelques secondes à plusieurs jours selon l'opérateur
 // ==========================================
 app.post('/process-withdrawal', async (req, res) => {
     const { 
@@ -223,10 +258,10 @@ app.post('/process-withdrawal', async (req, res) => {
     } = req.body;
 
     // Validation des paramètres
-    if (!sellerId || !amount || !phone || !provider) {
+    if (!sellerId || !amount || !phone) {
         return res.status(400).json({ 
             success: false, 
-            error: "Données manquantes (sellerId, amount, phone, provider requis)" 
+            error: "Données manquantes (sellerId, amount, phone requis)" 
         });
     }
 
@@ -237,14 +272,17 @@ app.post('/process-withdrawal', async (req, res) => {
         });
     }
 
+    // ✅ Formater le numéro au format LigdiCash (sans + ni espaces)
+    const formattedPhone = formatPhoneNumber(phone);
     console.log(`\n💸 ═══════════════════════════════════════`);
-    console.log(`   RETRAIT INSTANTANÉ DEMANDÉ`);
+    console.log(`   RETRAIT DEMANDÉ (Payout Marchand)`);
     console.log(`════════════════════════════════════════`);
     console.log(`   ├─ Vendeur: ${sellerId}`);
     console.log(`   ├─ Nom: ${sellerName || 'N/A'}`);
     console.log(`   ├─ Montant: ${amount} FCFA`);
-    console.log(`   ├─ Provider: ${provider}`);
-    console.log(`   └─ Numéro: ${phone}`);
+    console.log(`   ├─ Provider (info): ${provider || 'auto'}`);
+    console.log(`   ├─ Numéro original: ${phone}`);
+    console.log(`   └─ Numéro formaté: ${formattedPhone}`);
     console.log(`════════════════════════════════════════\n`);
 
     // Créer la référence du document AVANT (pour avoir l'ID)
@@ -378,7 +416,8 @@ app.post('/process-withdrawal', async (req, res) => {
             sellerId: sellerId,
             sellerName: sellerName || '',
             sellerPhone: phone,
-            mobileMoneyProvider: provider,
+            sellerPhoneFormatted: formattedPhone,
+            mobileMoneyProvider: provider || 'auto',
             amount: amount,
             fee: fee,
             netAmount: netAmount,
@@ -393,44 +432,49 @@ app.post('/process-withdrawal', async (req, res) => {
         console.log(`   ✅ Demande créée en statut "processing"\n`);
         
         // ═══════════════════════════════════════════════
-        // ÉTAPE 3 : APPELER L'API PAYOUT DE LIGDICASH
+        // ÉTAPE 3 : APPELER L'API PAYOUT OFFICIELLE LIGDICASH
+        // Endpoint : POST /pay/v01/straight/payout
         // ═══════════════════════════════════════════════
         console.log('📤 ÉTAPE 3 : Envoi à LigdiCash Payout...');
+        console.log('   Endpoint: POST /pay/v01/straight/payout');
         
-        // Préparer les noms
-        const nameParts = (sellerName || 'Professeur SmartEdu').split(' ');
-        const firstName = nameParts[0];
-        const lastName = nameParts.slice(1).join(' ') || 'SmartEdu';
-        
+        // ✅ Payload au format OFFICIEL LigdiCash
         const payload = {
-            payout: {
-                amount: netAmount,
-                currency: "XOF",
-                phone_number: phone.replace(/\s+/g, ''),
-                first_name: firstName,
-                last_name: lastName,
-                provider: provider.toLowerCase(),
-                description: `Retrait SmartEdu - ${sellerName || 'Professeur'}`,
-                external_id: `WITHDRAW-${withdrawalRef.id}`,
-                callback_url: "https://ligdicash-api.onrender.com/webhook-withdrawal"
-            },
-            custom_data: {
-                withdrawal_id: withdrawalRef.id,
-                seller_id: sellerId,
-                original_amount: amount,
-                fee: fee,
-                net_amount: netAmount
+            commande: {
+                // ✅ amount : montant en XOF (entier positif)
+                amount: parseInt(netAmount),
+                
+                // ✅ description : OBLIGATOIRE
+                description: `Retrait SmartEdu - ${sellerName || 'Professeur'} - ${withdrawalRef.id}`,
+                
+                // ✅ customer : numéro avec indicatif, SANS '+' ni espaces
+                customer: formattedPhone,
+                
+                // ✅ callback_url : URL HTTPS pour les notifications
+                callback_url: "https://ligdicash-api.onrender.com/webhook-withdrawal",
+                
+                // ✅ custom_data : métadonnées avec transaction_id (recommandé)
+                custom_data: {
+                    transaction_id: `WITHDRAW-${withdrawalRef.id}`,
+                    withdrawal_id: withdrawalRef.id,
+                    seller_id: sellerId,
+                    original_amount: amount,
+                    fee: fee,
+                    net_amount: netAmount,
+                    provider: provider || 'auto'
+                }
             }
         };
         
-        console.log(`   ├─ Bénéficiaire: ${firstName} ${lastName}`);
-        console.log(`   ├─ Provider: ${provider.toLowerCase()}`);
-        console.log(`   └─ Montant envoyé: ${netAmount} F\n`);
+        console.log(`   ├─ Amount: ${netAmount} XOF`);
+        console.log(`   ├─ Customer: ${formattedPhone}`);
+        console.log(`   ├─ Description: ${payload.commande.description}`);
+        console.log(`   └─ Transaction ID: WITHDRAW-${withdrawalRef.id}\n`);
         
         let payoutResponse;
         try {
             const response = await axios.post(
-                'https://app.ligdicash.com/pay/v01/payout/initiate',
+                'https://app.ligdicash.com/pay/v01/straight/payout',
                 payload,
                 {
                     headers: {
@@ -448,17 +492,23 @@ app.post('/process-withdrawal', async (req, res) => {
         } catch (error) {
             // ❌ Erreur réseau/API → marquer comme échoué
             console.error('\n   ❌ ERREUR RÉSEAU LIGDICASH');
-            console.error('   Message:', error.response?.data || error.message);
+            console.error('   Status:', error.response?.status);
+            console.error('   Data:', error.response?.data);
+            console.error('   Message:', error.message);
             
             await withdrawalRef.update({
                 status: 'failed',
                 failedAt: new Date().toISOString(),
-                failureReason: error.response?.data?.message || error.message || 'Erreur connexion LigdiCash'
+                failureReason: error.response?.data?.response_text || 
+                               error.response?.data?.message || 
+                               error.message || 
+                               'Erreur connexion LigdiCash'
             });
             
             return res.status(500).json({
                 success: false,
                 error: "Erreur lors de l'envoi Mobile Money. Réessayez dans quelques instants.",
+                details: error.response?.data || error.message,
                 withdrawalId: withdrawalRef.id
             });
         }
@@ -468,62 +518,74 @@ app.post('/process-withdrawal', async (req, res) => {
         // ═══════════════════════════════════════════════
         console.log('\n🔍 ÉTAPE 4 : Analyse de la réponse...');
         
-        const isSuccess = payoutResponse.response_code === '00' || 
-                         payoutResponse.status === 'success' || 
-                         payoutResponse.status === 'pending' ||
-                         payoutResponse.status === 'completed' ||
-                         payoutResponse.transaction_id ||
-                         payoutResponse.token;
+        // ✅ Un response_code === "00" signifie que le payout a été INITIÉ
+        // Le résultat final arrive via webhook
+        const isInitiated = payoutResponse.response_code === '00';
+        const ligdiCashToken = payoutResponse.token || null;
         
-        if (isSuccess) {
-            // ✅ PAIEMENT ACCEPTÉ
-            const transactionId = payoutResponse.transaction_id || payoutResponse.token || null;
-            
+        if (isInitiated) {
+            // ✅ PAYOUT INITIÉ AVEC SUCCÈS
+            // Le statut passe à "processing" en attendant le webhook
+            // Le webhook changera le statut en "paid" ou "failed"
             await withdrawalRef.update({
-                status: 'paid',
-                paidAt: new Date().toISOString(),
-                ligdiCashTransactionId: transactionId,
-                ligdiCashResponse: payoutResponse
+                status: 'processing',
+                ligdiCashTransactionId: ligdiCashToken,
+                ligdiCashResponse: payoutResponse,
+                initiatedAt: new Date().toISOString()
             });
             
             console.log(`\n   ✅ ════════════════════════════════`);
-            console.log(`      RETRAIT PAYÉ AVEC SUCCÈS !`);
+            console.log(`      PAYOUT INITIÉ AVEC SUCCÈS !`);
             console.log(`   ════════════════════════════════`);
-            console.log(`   ├─ ${netAmount} FCFA → ${phone}`);
-            console.log(`   └─ Transaction ID: ${transactionId || 'N/A'}`);
-            console.log(`   ════════════════════════════════\n`);
+            console.log(`   ├─ ${netAmount} FCFA → ${formattedPhone}`);
+            console.log(`   ├─ Token LigdiCash: ${ligdiCashToken || 'N/A'}`);
+            console.log(`   └─ Statut: En attente du webhook de confirmation`);
+            console.log(`   ════════════════════════════════`);
+            console.log(`   ⚠️  Délai réel : quelques secondes à plusieurs jours`);
+            console.log(`       selon l'opérateur (Orange, Moov, Wave, etc.)\n`);
             
+            // Retourner un statut "processing" à l'app
             return res.json({
                 success: true,
-                message: `✅ Retrait de ${netAmount} FCFA envoyé avec succès !`,
+                message: `✅ Retrait de ${netAmount} FCFA initié. Vous recevrez un SMS de confirmation.`,
                 withdrawalId: withdrawalRef.id,
-                transactionId: transactionId,
+                transactionId: ligdiCashToken,
                 netAmount: netAmount,
                 fee: fee,
-                status: 'paid'
+                status: 'processing'  // ⚠️ PAS "paid" - on attend le webhook !
             });
         } else {
-            // ❌ LIGDICASH A REFUSÉ
+            // ❌ LIGDICASH A REFUSÉ LA DEMANDE
             const errorReason = payoutResponse.response_text || 
+                               payoutResponse.description ||
                                payoutResponse.message || 
-                               'Paiement refusé par LigdiCash';
+                               `Code erreur: ${payoutResponse.response_code}`;
+            
+            const wikiUrl = payoutResponse.wiki || '';
             
             await withdrawalRef.update({
                 status: 'failed',
                 failedAt: new Date().toISOString(),
                 failureReason: errorReason,
-                ligdiCashResponse: payoutResponse
+                ligdiCashResponse: payoutResponse,
+                wikiUrl: wikiUrl
             });
             
             console.log(`\n   ❌ ════════════════════════════════`);
-            console.log(`      RETRAIT REFUSÉ`);
+            console.log(`      PAYOUT REFUSÉ`);
             console.log(`   ════════════════════════════════`);
-            console.log(`   └─ Raison: ${errorReason}`);
+            console.log(`   ├─ Code: ${payoutResponse.response_code}`);
+            console.log(`   ├─ Raison: ${errorReason}`);
+            if (wikiUrl) {
+                console.log(`   └─ Wiki: ${wikiUrl}`);
+            }
             console.log(`   ════════════════════════════════\n`);
             
             return res.status(400).json({
                 success: false,
                 error: errorReason,
+                responseCode: payoutResponse.response_code,
+                wikiUrl: wikiUrl,
                 withdrawalId: withdrawalRef.id
             });
         }
@@ -557,6 +619,9 @@ app.post('/process-withdrawal', async (req, res) => {
 // ==========================================
 // 4. WEBHOOK RETRAIT (confirmation asynchrone LigdiCash)
 // ==========================================
+// Ce webhook est appelé par LigdiCash quand le payout est finalisé
+// (payé ou échoué). Délai : quelques secondes à plusieurs jours.
+// ==========================================
 app.post('/webhook-withdrawal', async (req, res) => {
     console.log('\n🔔 ═══════════════════════════════════════');
     console.log('   WEBHOOK RETRAIT REÇU');
@@ -564,18 +629,32 @@ app.post('/webhook-withdrawal', async (req, res) => {
     console.log('Body:', JSON.stringify(req.body, null, 2));
     console.log('════════════════════════════════════════\n');
     
+    // ✅ Répondre 200 IMMÉDIATEMENT pour éviter les retries
     res.status(200).send('OK');
 
     try {
         const body = req.body;
         
-        // Extraire withdrawal_id depuis plusieurs sources possibles
-        const withdrawalId = extractCustom(body.custom_data, 'withdrawal_id') || 
-                            body.external_id?.replace('WITHDRAW-', '') ||
-                            body.payout?.external_id?.replace('WITHDRAW-', '');
+        // ✅ Extraire transaction_id depuis custom_data (format recommandé)
+        // Le transaction_id est notre identifiant unique : "WITHDRAW-{id}"
+        let transactionId = extractCustom(body.custom_data, 'transaction_id');
+        let withdrawalId = extractCustom(body.custom_data, 'withdrawal_id');
+        
+        // Fallback : chercher dans external_id
+        if (!withdrawalId && body.external_id) {
+            withdrawalId = body.external_id.replace('WITHDRAW-', '');
+        }
+        
+        // Fallback : chercher dans custom_data directement
+        if (!withdrawalId && body.custom_data) {
+            if (typeof body.custom_data === 'object') {
+                withdrawalId = body.custom_data.withdrawal_id;
+            }
+        }
         
         if (!withdrawalId) {
             console.log('⚠️ withdrawalId introuvable dans le webhook');
+            console.log('   transaction_id:', transactionId);
             console.log('   custom_data:', body.custom_data);
             console.log('   external_id:', body.external_id);
             return;
@@ -616,7 +695,7 @@ app.post('/webhook-withdrawal', async (req, res) => {
             console.log(`   ⏳ En cours de traitement (pas de changement)\n`);
         }
         // Cas 3 : Échec
-        else if (status === 'failed' || status === 'error' || status === 'cancelled') {
+        else if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'notcompleted') {
             const failureReason = body.response_text || body.message || 'Erreur LigdiCash';
             
             await withdrawalRef.update({
@@ -645,13 +724,14 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'LigdiCash SmartEduAfrica API',
-        version: '2.0 - Instant Withdrawal',
+        version: '3.0 - Official Payout Endpoint',
         endpoints: [
             'POST /initiate-payment',
             'POST /webhook',
-            'POST /process-withdrawal (instant)',
+            'POST /process-withdrawal',
             'POST /webhook-withdrawal'
         ],
+        documentation: 'https://developers.ligdicash.com/api-paiement/payout/vers-mobile-money',
         timestamp: new Date().toISOString()
     });
 });
@@ -663,16 +743,17 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log('');
     console.log('╔══════════════════════════════════════════════╗');
-    console.log('║  🚀 Serveur LigdiCash SmartEduAfrica v2.0    ║');
+    console.log('║  🚀 Serveur LigdiCash SmartEduAfrica v3.0    ║');
     console.log('║     Actif sur le port ' + PORT + '                    ║');
     console.log('╚══════════════════════════════════════════════╝');
     console.log('');
     console.log('📡 Endpoints disponibles :');
     console.log('   ├─ POST /initiate-payment (paiements)');
     console.log('   ├─ POST /webhook (confirmation paiements)');
-    console.log('   ├─ POST /process-withdrawal (⚡ retraits instantanés)');
+    console.log('   ├─ POST /process-withdrawal (retraits marchand)');
     console.log('   └─ POST /webhook-withdrawal (confirmations retraits)');
     console.log('');
-    console.log('⚡ Mode: Retraits INSTANTANÉS sans approbation admin');
+    console.log('💸 Payout : POST /pay/v01/straight/payout (OFFICIEL)');
+    console.log('⚠️  Délai réel : quelques secondes à plusieurs jours');
     console.log('');
 });
