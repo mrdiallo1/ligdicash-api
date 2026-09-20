@@ -27,6 +27,28 @@ app.post('/initiate-payment', async (req, res) => {
     }
 
     try {
+        // ✅ NOUVEAU : Récupérer sellerId et infos produit pour les achats library
+        let sellerId = null;
+        let productTitle = '';
+        let productPrice = parseInt(amount);
+        
+        if (type === 'library' && itemId) {
+            try {
+                const productSnap = await db.collection('digital_products').doc(itemId).get();
+                if (productSnap.exists) {
+                    const productData = productSnap.data();
+                    sellerId = productData.sellerId || null;
+                    productTitle = productData.title || '';
+                    productPrice = productData.price || parseInt(amount);
+                    console.log(`📦 Produit trouvé: "${productTitle}" (vendeur: ${sellerId}, prix: ${productPrice}F)`);
+                } else {
+                    console.log(`⚠️ Produit introuvable: ${itemId}`);
+                }
+            } catch (err) {
+                console.log(`⚠️ Erreur récupération produit: ${err.message}`);
+            }
+        }
+
         const payload = {
             commande: {
                 invoice: {
@@ -34,7 +56,7 @@ app.post('/initiate-payment', async (req, res) => {
                     total_amount: parseInt(amount),
                     devise: "XOF",
                     description: description || "Achat SmartEduAfrica",
-                    customer: "",  // ✅ VIDE ! (obligatoire selon support LigdiCash)
+                    customer: "",
                     customer_firstname: "Client",
                     customer_lastname: "SmartEdu",
                     customer_email: "client@smarteduafrica.com",
@@ -82,19 +104,27 @@ app.post('/initiate-payment', async (req, res) => {
                 ? new Date(start.getTime() + oneYear)
                 : null;
 
+            // ✅ Document enrichi avec sellerId, productTitle, productPrice
             await db.collection('purchases').doc(orderId).set({
                 uid: uid,
                 phone: phone,
-                type: type,              // "premium" | "library" | "group"
+                type: type,
                 itemId: itemId || null,
+                sellerId: sellerId,           // ✅ NOUVEAU - permet aux profs de voir leurs ventes
+                productTitle: productTitle,   // ✅ NOUVEAU - utile pour stats
+                productPrice: productPrice,   // ✅ NOUVEAU - prix officiel du produit
                 amount: parseInt(amount),
                 status: 'pending',
                 token: data.token,
+                orderId: orderId,             // ✅ NOUVEAU - référence explicite
                 startDate: admin.firestore.Timestamp.fromDate(start),
                 endDate: end ? admin.firestore.Timestamp.fromDate(end) : null,
                 createdAt: new Date().toISOString()
             });
             console.log(`✅ Transaction ${orderId} (${type}) créée pour ${uid}`);
+            console.log(`   ├─ sellerId: ${sellerId || 'aucun'}`);
+            console.log(`   ├─ itemId: ${itemId || 'aucun'}`);
+            console.log(`   └─ titre: "${productTitle}"`);
         }
 
         res.json(data);
@@ -170,6 +200,8 @@ app.post('/webhook', async (req, res) => {
                 console.log(`🎉 PREMIUM ACTIVÉ (1 an) pour ${pay.uid}`);
             } else {
                 console.log(`🎉 ACHAT VALIDÉ (${pay.type}) : ${pay.itemId} pour ${pay.uid}`);
+                console.log(`   ├─ Vendeur: ${pay.sellerId || 'inconnu'}`);
+                console.log(`   └─ Produit: "${pay.productTitle}" (${pay.productPrice}F)`);
             }
         } else if (status === 'notcompleted') {
             await payRef.update({ status: 'notcompleted' });
