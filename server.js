@@ -72,16 +72,29 @@ function delay(ms) {
 app.post('/initiate-payment', async (req, res) => {
     const { amount, phone, description, orderId, uid, type, itemId } = req.body;
 
+    // ✅ Logs de debug
+    console.log('\n💳 ═══════════════════════════════════════');
+    console.log('   INITIATE PAYMENT');
+    console.log('════════════════════════════════════════');
+    console.log('   ├─ Type:', type);
+    console.log('   ├─ ItemId:', itemId || 'aucun');
+    console.log('   ├─ Amount:', amount);
+    console.log('   ├─ Phone:', phone);
+    console.log('   ├─ UID:', uid);
+    console.log('   └─ OrderId:', orderId);
+    console.log('════════════════════════════════════════\n');
+
     if (!amount || !phone || !orderId || !uid || !type) {
         return res.status(400).json({ error: "Données manquantes (uid/type requis)" });
     }
 
     try {
-        // ✅ Récupérer sellerId et infos produit pour les achats library
+        // ✅ Récupérer sellerId et infos produit selon le type
         let sellerId = null;
         let productTitle = '';
         let productPrice = parseInt(amount);
         
+        // ✅ CAS 1 : Achat bibliothèque
         if (type === 'library' && itemId) {
             try {
                 const productSnap = await db.collection('digital_products').doc(itemId).get();
@@ -96,6 +109,24 @@ app.post('/initiate-payment', async (req, res) => {
                 }
             } catch (err) {
                 console.log(`⚠️ Erreur récupération produit: ${err.message}`);
+            }
+        }
+        
+        // ✅ CAS 2 : Abonnement groupe
+        if (type === 'group' && itemId) {
+            try {
+                const groupSnap = await db.collection('groups').doc(itemId).get();
+                if (groupSnap.exists) {
+                    const groupData = groupSnap.data();
+                    sellerId = groupData.teacherId || null;
+                    productTitle = groupData.title || '';
+                    productPrice = groupData.priceYearly || parseInt(amount);
+                    console.log(`👥 Groupe trouvé: "${productTitle}" (prof: ${sellerId}, prix: ${productPrice}F)`);
+                } else {
+                    console.log(`⚠️ Groupe introuvable: ${itemId}`);
+                }
+            } catch (err) {
+                console.log(`⚠️ Erreur récupération groupe: ${err.message}`);
             }
         }
 
@@ -131,6 +162,8 @@ app.post('/initiate-payment', async (req, res) => {
             }
         };
 
+        console.log('📤 Envoi à LigdiCash...');
+
         const response = await axios.post(
             'https://app.ligdicash.com/pay/v01/redirect/checkout-invoice/create',
             payload,
@@ -145,6 +178,7 @@ app.post('/initiate-payment', async (req, res) => {
         );
 
         const data = response.data;
+        console.log('📥 Réponse LigdiCash:', JSON.stringify(data, null, 2));
 
         // ✅ Stocke la transaction dans Firestore pour le webhook
         if (data.response_code === '00' && data.token) {
@@ -178,7 +212,7 @@ app.post('/initiate-payment', async (req, res) => {
 
         res.json(data);
     } catch (error) {
-        console.error("Erreur LigdiCash:", error.response ? error.response.data : error.message);
+        console.error("❌ Erreur LigdiCash:", error.response ? error.response.data : error.message);
         res.status(500).json({
             error: "Échec de l'initialisation",
             details: error.response ? error.response.data : error.message
@@ -190,7 +224,12 @@ app.post('/initiate-payment', async (req, res) => {
 // 2. WEBHOOK PAIEMENT : valide le paiement + enregistre
 // ==========================================
 app.post('/webhook', async (req, res) => {
-    console.log("🔔 WEBHOOK PAIEMENT REÇU:", JSON.stringify(req.body));
+    console.log("\n🔔 ═══════════════════════════════════════");
+    console.log("   WEBHOOK PAIEMENT REÇU");
+    console.log("════════════════════════════════════════");
+    console.log("Body:", JSON.stringify(req.body, null, 2));
+    console.log("════════════════════════════════════════\n");
+    
     res.status(200).send('OK');
 
     try {
@@ -224,6 +263,7 @@ app.post('/webhook', async (req, res) => {
                 confirmedAt: new Date().toISOString()
             });
 
+            // ✅ CAS 1 : Premium
             if (pay.type === 'premium') {
                 await db.collection('users').doc(pay.uid).update({
                     isPremium: true,
@@ -232,7 +272,41 @@ app.post('/webhook', async (req, res) => {
                     premiumOrderId: orderId
                 });
                 console.log(`🎉 PREMIUM ACTIVÉ (1 an) pour ${pay.uid}`);
-            } else {
+            }
+            // ✅ CAS 2 : Groupe - Ajouter l'élève au groupe
+            else if (pay.type === 'group' && pay.itemId) {
+                try {
+                    // Ajouter l'élève comme membre actif du groupe
+                    const memberRef = db.collection('group_members').doc();
+                    await memberRef.set({
+                        groupId: pay.itemId,
+                        userId: pay.uid,
+                        status: 'active',
+                        purchaseId: orderId,
+                        joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        expiresAt: pay.endDate,
+                        paymentAmount: pay.amount,
+                    });
+                    console.log(`🎉 ÉLÈVE AJOUTÉ AU GROUPE`);
+                    console.log(`   ├─ Groupe: ${pay.itemId}`);
+                    console.log(`   ├─ Élève: ${pay.uid}`);
+                    console.log(`   ├─ Titre: "${pay.productTitle}"`);
+                    console.log(`   └─ Expire: ${pay.endDate ? pay.endDate.toDate() : 'N/A'}`);
+                    
+                    // Mettre à jour le compteur de membres du groupe (optionnel)
+                    try {
+                        await db.collection('groups').doc(pay.itemId).update({
+                            membersCount: admin.firestore.FieldValue.increment(1)
+                        });
+                    } catch (e) {
+                        console.log('⚠️ Impossible de mettre à jour membersCount:', e.message);
+                    }
+                } catch (err) {
+                    console.error('❌ Erreur ajout membre groupe:', err.message);
+                }
+            }
+            // ✅ CAS 3 : Bibliothèque
+            else {
                 console.log(`🎉 ACHAT VALIDÉ (${pay.type}) : ${pay.itemId} pour ${pay.uid}`);
                 console.log(`   ├─ Vendeur: ${pay.sellerId || 'inconnu'}`);
                 console.log(`   └─ Produit: "${pay.productTitle}" (${pay.productPrice}F)`);
@@ -247,16 +321,11 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==========================================
-// 3. ✅ RETRAIT - PAYOUT MARCHAND (CORRIGÉ CODE 09)
+// 3. ✅ RETRAIT - PAYOUT MARCHAND (CORRIGÉ)
 // ==========================================
-// Documentation : https://developers.ligdicash.com/api-paiement/payout/vers-mobile-money
-// Endpoint : POST /pay/v01/straight/payout
-// Corrections Code 09 :
-//   - Payload custom_data simplifié (uniquement transaction_id)
-//   - Retry automatique (3 tentatives avec délai 2s)
-//   - Validation regex du numéro
-//   - Montant net arrondi (entier positif)
-//   - Description courte (<50 chars)
+// Gère 2 sources :
+//   - 'library' : retraits depuis la bibliothèque
+//   - 'groups'  : retraits depuis les groupes
 // ==========================================
 app.post('/process-withdrawal', async (req, res) => {
     const { 
@@ -264,8 +333,11 @@ app.post('/process-withdrawal', async (req, res) => {
         amount, 
         phone, 
         provider,
-        sellerName 
+        sellerName,
+        source  // ✅ NOUVEAU : 'library' ou 'groups'
     } = req.body;
+
+    const withdrawalSource = source || 'library';
 
     // ═══════════════════════════════════════════════
     // VALIDATION DES PARAMÈTRES
@@ -296,12 +368,13 @@ app.post('/process-withdrawal', async (req, res) => {
     }
     
     console.log(`\n💸 ═══════════════════════════════════════`);
-    console.log(`   RETRAIT DEMANDÉ (Payout Marchand)`);
+    console.log(`   RETRAIT DEMANDÉ (Source: ${withdrawalSource})`);
     console.log(`════════════════════════════════════════`);
     console.log(`   ├─ Vendeur: ${sellerId}`);
     console.log(`   ├─ Nom: ${sellerName || 'N/A'}`);
-    console.log(`   ├─ Montant demandé: ${amount} FCFA`);
-    console.log(`   ├─ Provider (info): ${provider || 'auto'}`);
+    console.log(`   ├─ Montant: ${amount} FCFA`);
+    console.log(`   ├─ Provider: ${provider || 'auto'}`);
+    console.log(`   ├─ Source: ${withdrawalSource}`);
     console.log(`   ├─ Numéro original: ${phone}`);
     console.log(`   └─ Numéro formaté: ${formattedPhone}`);
     console.log(`════════════════════════════════════════\n`);
@@ -310,95 +383,171 @@ app.post('/process-withdrawal', async (req, res) => {
     
     try {
         // ═══════════════════════════════════════════════
-        // ÉTAPE 1 : VÉRIFIER LE SOLDE DU VENDEUR
+        // ÉTAPE 1 : CALCULER LE SOLDE SELON LA SOURCE
         // ═══════════════════════════════════════════════
-        console.log('🔍 ÉTAPE 1 : Vérification du solde...');
+        console.log(`🔍 ÉTAPE 1 : Calcul du solde (${withdrawalSource})...`);
         
-        const myProductIds = new Set();
-        try {
-            const productsSnap = await db.collection('digital_products')
-                .where('sellerId', '==', sellerId)
-                .get();
-            
-            for (const doc of productsSnap.docs) {
-                myProductIds.add(doc.id);
-            }
-            console.log(`   📦 ${myProductIds.size} produits trouvés`);
-        } catch (e) {
-            console.log(`   ⚠️ Erreur produits: ${e.message}`);
-        }
-        
-        // Calculer revenus totaux (80%)
         let totalRevenue = 0.0;
         
-        try {
-            const salesSnap = await db.collection('purchases')
-                .where('sellerId', '==', sellerId)
-                .where('status', '==', 'completed')
-                .get();
-            
-            for (const sale of salesSnap.docs) {
-                const data = sale.data();
-                const price = data.productPrice || 0;
-                totalRevenue += price * 0.80;
-            }
-            console.log(`   💰 Revenus via sellerId: ${totalRevenue.toFixed(2)} F`);
-        } catch (e) {
-            console.log(`   ⚠️ Erreur ventes sellerId: ${e.message}`);
-        }
-        
-        // Fallback par itemId
-        try {
-            const allSales = await db.collection('purchases')
-                .where('type', '==', 'library')
-                .where('status', '==', 'completed')
-                .get();
-            
-            let fallbackRevenue = 0.0;
-            for (const sale of allSales.docs) {
-                const data = sale.data();
-                if (myProductIds.has(data.itemId) && data.sellerId !== sellerId) {
-                    const price = data.productPrice || 0;
-                    fallbackRevenue += price * 0.80;
+        if (withdrawalSource === 'groups') {
+            // ✅ SOURCE GROUPES : Revenus des groupes
+            try {
+                // 1. Récupérer les groupes du vendeur
+                const groupsSnap = await db.collection('groups')
+                    .where('teacherId', '==', sellerId)
+                    .get();
+                
+                console.log(`   👥 ${groupsSnap.docs.length} groupes trouvés`);
+                
+                // 2. Pour chaque groupe, compter les ventes
+                for (const groupDoc of groupsSnap.docs) {
+                    const groupData = groupDoc.data();
+                    const priceYearly = (groupData.priceYearly || 0);
+                    
+                    try {
+                        const salesSnap = await db.collection('purchases')
+                            .where('itemId', '==', groupDoc.id)
+                            .where('type', '==', 'group')
+                            .where('status', '==', 'completed')
+                            .get();
+                        
+                        const salesCount = salesSnap.docs.length;
+                        const revenue = salesCount * priceYearly * 0.80; // 80% pour le prof
+                        totalRevenue += revenue;
+                        
+                        if (salesCount > 0) {
+                            console.log(`   ├─ "${groupData.title}": ${salesCount} ventes → ${revenue.toFixed(2)}F`);
+                        }
+                    } catch (e) {
+                        console.log(`   ⚠️ Erreur pour groupe ${groupDoc.id}: ${e.message}`);
+                    }
                 }
+                
+                console.log(`   💰 Total revenus groupes: ${totalRevenue.toFixed(2)} F`);
+            } catch (e) {
+                console.log(`   ⚠️ Erreur calcul revenus groupes: ${e.message}`);
             }
-            totalRevenue += fallbackRevenue;
-            if (fallbackRevenue > 0) {
-                console.log(`   💰 Revenus fallback: +${fallbackRevenue.toFixed(2)} F`);
+        } else {
+            // ✅ SOURCE BIBLIOTHÈQUE : Revenus des produits digitaux
+            const myProductIds = new Set();
+            try {
+                const productsSnap = await db.collection('digital_products')
+                    .where('sellerId', '==', sellerId)
+                    .get();
+                
+                for (const doc of productsSnap.docs) {
+                    myProductIds.add(doc.id);
+                }
+                console.log(`   📦 ${myProductIds.size} produits trouvés`);
+            } catch (e) {
+                console.log(`   ⚠️ Erreur produits: ${e.message}`);
             }
-        } catch (e) {
-            console.log(`   ⚠️ Erreur fallback: ${e.message}`);
+            
+            // Ventes via sellerId
+            try {
+                const salesSnap = await db.collection('purchases')
+                    .where('sellerId', '==', sellerId)
+                    .where('status', '==', 'completed')
+                    .get();
+                
+                for (const sale of salesSnap.docs) {
+                    const data = sale.data();
+                    const price = data.productPrice || 0;
+                    totalRevenue += price * 0.80;
+                }
+                console.log(`   💰 Revenus via sellerId: ${totalRevenue.toFixed(2)} F`);
+            } catch (e) {
+                console.log(`   ⚠️ Erreur ventes sellerId: ${e.message}`);
+            }
+            
+            // Fallback par itemId
+            try {
+                const allSales = await db.collection('purchases')
+                    .where('type', '==', 'library')
+                    .where('status', '==', 'completed')
+                    .get();
+                
+                let fallbackRevenue = 0.0;
+                for (const sale of allSales.docs) {
+                    const data = sale.data();
+                    if (myProductIds.has(data.itemId) && data.sellerId !== sellerId) {
+                        const price = data.productPrice || 0;
+                        fallbackRevenue += price * 0.80;
+                    }
+                }
+                totalRevenue += fallbackRevenue;
+                if (fallbackRevenue > 0) {
+                    console.log(`   💰 Revenus fallback: +${fallbackRevenue.toFixed(2)} F`);
+                }
+            } catch (e) {
+                console.log(`   ⚠️ Erreur fallback: ${e.message}`);
+            }
         }
         
-        // Déjà retiré
+        // Déjà retiré (filtré par source)
         let withdrawn = 0.0;
         try {
-            const paidSnap = await db.collection('withdrawal_requests')
+            let paidQuery = db.collection('withdrawal_requests')
                 .where('sellerId', '==', sellerId)
-                .where('status', '==', 'paid')
-                .get();
+                .where('source', '==', withdrawalSource)
+                .where('status', '==', 'paid');
+            
+            const paidSnap = await paidQuery.get();
             
             for (const doc of paidSnap.docs) {
                 withdrawn += doc.data().netAmount || 0;
             }
-        } catch (e) {}
+        } catch (e) {
+            // Fallback sans filtre source (pour les anciennes données)
+            try {
+                const paidSnap = await db.collection('withdrawal_requests')
+                    .where('sellerId', '==', sellerId)
+                    .where('status', '==', 'paid')
+                    .get();
+                
+                for (const doc of paidSnap.docs) {
+                    const data = doc.data();
+                    // Inclure seulement si la source correspond ou n'existe pas
+                    if (!data.source || data.source === withdrawalSource) {
+                        withdrawn += data.netAmount || 0;
+                    }
+                }
+            } catch (e2) {}
+        }
         
-        // En attente
+        // En attente (filtré par source)
         let pending = 0.0;
         try {
-            const pendingSnap = await db.collection('withdrawal_requests')
+            let pendingQuery = db.collection('withdrawal_requests')
                 .where('sellerId', '==', sellerId)
-                .where('status', 'in', ['pending', 'processing', 'approved'])
-                .get();
+                .where('source', '==', withdrawalSource)
+                .where('status', 'in', ['pending', 'processing', 'approved']);
+            
+            const pendingSnap = await pendingQuery.get();
             
             for (const doc of pendingSnap.docs) {
                 pending += doc.data().amount || 0;
             }
-        } catch (e) {}
+        } catch (e) {
+            // Fallback sans filtre source
+            try {
+                const pendingSnap = await db.collection('withdrawal_requests')
+                    .where('sellerId', '==', sellerId)
+                    .where('status', 'in', ['pending', 'processing', 'approved'])
+                    .get();
+                
+                for (const doc of pendingSnap.docs) {
+                    const data = doc.data();
+                    if (!data.source || data.source === withdrawalSource) {
+                        pending += data.amount || 0;
+                    }
+                }
+            } catch (e2) {}
+        }
         
         const availableBalance = Math.max(0, totalRevenue - withdrawn - pending);
         
-        console.log(`\n   📊 RÉSUMÉ SOLDE:`);
+        console.log(`\n   📊 RÉSUMÉ SOLDE (${withdrawalSource}):`);
         console.log(`   ├─ Revenus totaux (80%): ${totalRevenue.toFixed(2)} F`);
         console.log(`   ├─ Déjà retiré: ${withdrawn.toFixed(2)} F`);
         console.log(`   ├─ En attente: ${pending.toFixed(2)} F`);
@@ -438,6 +587,7 @@ app.post('/process-withdrawal', async (req, res) => {
             fee: fee,
             netAmount: netAmount,
             status: 'processing',
+            source: withdrawalSource,  // ✅ NOUVEAU : 'library' ou 'groups'
             createdAt: new Date().toISOString(),
             processedAt: new Date().toISOString(),
             paidAt: null,
@@ -455,7 +605,6 @@ app.post('/process-withdrawal', async (req, res) => {
         console.log('   Endpoint: POST /pay/v01/straight/payout\n');
         
         // ✅ Payload SIMPLIFIÉ selon documentation officielle
-        // custom_data contient UNIQUEMENT transaction_id (recommandé par LigdiCash)
         const payload = {
             commande: {
                 amount: netAmount, // ✅ Entier positif
@@ -573,10 +722,8 @@ app.post('/process-withdrawal', async (req, res) => {
             console.log(`   ════════════════════════════════`);
             console.log(`   ├─ ${netAmount} FCFA → ${formattedPhone}`);
             console.log(`   ├─ Token LigdiCash: ${ligdiCashToken || 'N/A'}`);
-            console.log(`   └─ Statut: En attente du webhook de confirmation`);
-            console.log(`   ════════════════════════════════`);
-            console.log(`   ⚠️  Délai réel : quelques secondes à plusieurs jours`);
-            console.log(`       selon l'opérateur (Orange, Moov, Wave, etc.)\n`);
+            console.log(`   └─ Source: ${withdrawalSource}`);
+            console.log(`   ════════════════════════════════\n`);
             
             return res.json({
                 success: true,
@@ -589,6 +736,7 @@ app.post('/process-withdrawal', async (req, res) => {
             });
         } else {
             // ❌ LIGDICASH A REFUSÉ LA DEMANDE
+            // ✅ SYSTÈME HYBRIDE : Mettre en 'pending' pour validation admin
             const errorReason = payoutResponse.response_text || 
                                payoutResponse.description ||
                                payoutResponse.message || 
@@ -596,6 +744,37 @@ app.post('/process-withdrawal', async (req, res) => {
             
             const wikiUrl = payoutResponse.wiki || '';
             
+            // ✅ Si erreur IP (Code 14) ou autre → passer en pending pour admin
+            const isIpError = payoutResponse.response_code === '14';
+            const shouldFallbackToManual = isIpError || payoutResponse.response_code === '09';
+            
+            if (shouldFallbackToManual) {
+                console.log(`   🔄 Erreur ${payoutResponse.response_code}, passage en validation manuelle...`);
+                
+                await withdrawalRef.update({
+                    status: 'pending', // ← Admin devra valider
+                    failedAt: new Date().toISOString(),
+                    failureReason: `Auto échoué (${payoutResponse.response_code}): ${errorReason}`,
+                    ligdiCashResponse: payoutResponse,
+                    wikiUrl: wikiUrl,
+                    responseCode: payoutResponse.response_code,
+                    retryCount: maxRetries,
+                    manualApprovalRequired: true, // ← Flag pour admin
+                    autoAttemptedAt: new Date().toISOString()
+                });
+                
+                return res.status(200).json({
+                    success: true, // ← Succès de la CRÉATION
+                    message: `📋 Demande enregistrée. Un administrateur traitera votre retrait sous 24-48h.`,
+                    withdrawalId: withdrawalRef.id,
+                    netAmount: netAmount,
+                    fee: fee,
+                    status: 'pending',
+                    requiresManualApproval: true
+                });
+            }
+            
+            // Autres erreurs → échec direct
             await withdrawalRef.update({
                 status: 'failed',
                 failedAt: new Date().toISOString(),
@@ -606,15 +785,9 @@ app.post('/process-withdrawal', async (req, res) => {
                 retryCount: maxRetries
             });
             
-            console.log(`\n   ❌ ════════════════════════════════`);
-            console.log(`      PAYOUT REFUSÉ`);
-            console.log(`   ════════════════════════════════`);
+            console.log(`\n   ❌ PAYOUT REFUSÉ`);
             console.log(`   ├─ Code: ${payoutResponse.response_code}`);
-            console.log(`   ├─ Raison: ${errorReason}`);
-            if (wikiUrl) {
-                console.log(`   └─ Wiki: ${wikiUrl}`);
-            }
-            console.log(`   ════════════════════════════════\n`);
+            console.log(`   └─ Raison: ${errorReason}\n`);
             
             return res.status(400).json({
                 success: false,
@@ -756,19 +929,20 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'LigdiCash SmartEduAfrica API',
-        version: '3.1 - Code 09 Fixed + Retry',
+        version: '4.0 - Groups + Hybrid Withdrawal',
         endpoints: [
-            'POST /initiate-payment',
-            'POST /webhook',
-            'POST /process-withdrawal',
-            'POST /webhook-withdrawal'
+            'POST /initiate-payment (premium/library/group)',
+            'POST /webhook (paiements)',
+            'POST /process-withdrawal (library/groups)',
+            'POST /webhook-withdrawal (retraits)'
         ],
-        fixes: [
-            'Payload simplifié (custom_data: transaction_id uniquement)',
-            'Retry automatique (3 tentatives)',
-            'Validation regex du numéro',
-            'Montant net arrondi (entier)',
-            'Description courte (<50 chars)'
+        features: [
+            '✅ Paiements : premium, library, groups',
+            '✅ Auto-ajout élève au groupe après paiement',
+            '✅ Retraits avec source (library/groups)',
+            '✅ Système hybride (auto + admin fallback)',
+            '✅ Retry automatique (3 tentatives)',
+            '✅ Payload simplifié (Code 09 fixed)'
         ],
         documentation: 'https://developers.ligdicash.com/api-paiement/payout/vers-mobile-money',
         timestamp: new Date().toISOString()
@@ -782,24 +956,20 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log('');
     console.log('╔══════════════════════════════════════════════╗');
-    console.log('║  🚀 Serveur LigdiCash SmartEduAfrica v3.1    ║');
+    console.log('║  🚀 Serveur LigdiCash SmartEduAfrica v4.0    ║');
     console.log('║     Actif sur le port ' + PORT + '                    ║');
     console.log('╚══════════════════════════════════════════════╝');
     console.log('');
-    console.log('📡 Endpoints disponibles :');
-    console.log('   ├─ POST /initiate-payment (paiements)');
+    console.log('📡 Endpoints :');
+    console.log('   ├─ POST /initiate-payment (premium/library/group)');
     console.log('   ├─ POST /webhook (confirmation paiements)');
-    console.log('   ├─ POST /process-withdrawal (retraits marchand)');
-    console.log('   └─ POST /webhook-withdrawal (confirmations retraits)');
+    console.log('   ├─ POST /process-withdrawal (retraits)');
+    console.log('   └─ POST /webhook-withdrawal (confirmations)');
     console.log('');
-    console.log('💸 Payout : POST /pay/v01/straight/payout (OFFICIEL)');
-    console.log('🔧 Corrections Code 09 :');
-    console.log('   ├─ Payload simplifié (custom_data = transaction_id)');
-    console.log('   ├─ Retry automatique (3 tentatives)');
-    console.log('   ├─ Validation regex numéro');
-    console.log('   ├─ Montant net arrondi (entier)');
-    console.log('   └─ Description courte (<50 chars)');
-    console.log('');
-    console.log('⚠️  Délai réel : quelques secondes à plusieurs jours');
+    console.log('🎯 Fonctionnalités :');
+    console.log('   ├─ 💳 Paiements groupes (auto-ajout élève)');
+    console.log('   ├─ 💸 Retraits source: library / groups');
+    console.log('   ├─ 🔄 Système hybride (auto + admin)');
+    console.log('   └─ 🔁 Retry automatique (3 tentatives)');
     console.log('');
 });
