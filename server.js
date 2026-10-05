@@ -30,7 +30,7 @@ app.use(express.json({
 // ==========================================
 const API_KEY = process.env.LIGDI_API_KEY;
 const API_TOKEN = process.env.LIGDI_API_TOKEN;
-const MIN_AMOUNT = parseInt(process.env.MIN_AMOUNT || '1000', 10); // 1000 par défaut, 10 pour tests
+const MIN_AMOUNT = parseInt(process.env.MIN_AMOUNT || '10', 10); // 1000 par défaut, 10 pour tests
 const CALLBACK_VIEW_TOKEN = process.env.CALLBACK_VIEW_TOKEN || 'smartedu_default_token_2024';
 
 console.log(`⚙️  Config: MIN_AMOUNT=${MIN_AMOUNT} FCFA`);
