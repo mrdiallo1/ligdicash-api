@@ -531,7 +531,7 @@ app.post('/process-withdrawal', async (req, res) => {
     if (!/^[0-9]{10,15}$/.test(formattedPhone)) {
         return res.status(400).json({
             success: false,
-            error: `Numéro invalide: ${formattedPhone}. Format: 226XXXXXXXX`
+            error: `Numéro invalide: ${formattedPhone}. Format: 223XXXXXXXX`
         });
     }
     
