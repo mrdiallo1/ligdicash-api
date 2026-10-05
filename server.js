@@ -84,7 +84,7 @@ function formatPhoneNumber(phone) {
     let cleaned = phone.replace(/[^\d+]/g, '');
     if (cleaned.startsWith('+')) cleaned = cleaned.substring(1);
     if (cleaned.startsWith('00')) cleaned = cleaned.substring(2);
-    if (/^0[0-9]{7,8}$/.test(cleaned)) cleaned = '226' + cleaned.substring(1);
+    if (/^0[0-9]{7,8}$/.test(cleaned)) cleaned = '223' + cleaned.substring(1);
     return cleaned;
 }
 
