@@ -23,6 +23,10 @@ admin.initializeApp({
 const db = admin.firestore();
 const app = express();
 
+// ==========================================
+// 2. MIDDLEWARES
+// ==========================================
+
 app.use(cors());
 
 app.use(express.urlencoded({
@@ -39,14 +43,13 @@ app.use(express.json({
 }));
 
 // ==========================================
-// 2. CONFIGURATION
+// 3. CONFIGURATION
 // ==========================================
 
 const API_KEY = process.env.LIGDI_API_KEY;
 const API_TOKEN = process.env.LIGDI_API_TOKEN;
 
 const MIN_AMOUNT = Number(process.env.MIN_AMOUNT || 10);
-
 const CALLBACK_VIEW_TOKEN = process.env.CALLBACK_VIEW_TOKEN;
 
 const BASE = 'https://app.ligdicash.com';
@@ -82,7 +85,7 @@ const headers = () => ({
 });
 
 // ==========================================
-// 3. FONCTIONS UTILITAIRES
+// 4. FONCTIONS UTILITAIRES
 // ==========================================
 
 const validOrderId = id =>
@@ -141,15 +144,12 @@ async function saveCallbackLog(entry) {
             savedAt: stamp()
         });
     } catch (e) {
-        console.error(
-            'Sauvegarde callback :',
-            e.message
-        );
+        console.error('Sauvegarde callback :', e.message);
     }
 }
 
 // ==========================================
-// 4. EXTRACTION DU LIEN LIGDICASH
+// 5. EXTRACTION DU LIEN LIGDICASH
 // ==========================================
 
 function paymentUrl(data) {
@@ -158,24 +158,40 @@ function paymentUrl(data) {
         data?.payment_url,
         data?.paymentUrl,
         data?.redirect_url,
+        data?.redirectUrl,
         data?.url,
-        data?.data?.response_text
+        data?.data?.response_text,
+        data?.data?.payment_url,
+        data?.data?.paymentUrl,
+        data?.data?.redirect_url,
+        data?.data?.url,
+        data?.response?.response_text
     ];
 
-    return candidates.find(v => {
-        try {
-            return (
-                typeof v === 'string' &&
-                new URL(v).protocol === 'https:'
-            );
-        } catch {
-            return false;
+    for (const value of candidates) {
+        if (typeof value !== 'string') {
+            continue;
         }
-    }) || null;
+
+        try {
+            const parsed = new URL(value);
+
+            if (
+                parsed.protocol === 'https:' ||
+                parsed.protocol === 'http:'
+            ) {
+                return parsed.href;
+            }
+        } catch {
+            // La valeur ne correspond pas à une URL valide.
+        }
+    }
+
+    return null;
 }
 
 // ==========================================
-// 5. CONSTRUCTION DE LA FACTURE
+// 6. CONSTRUCTION DE LA FACTURE
 // ==========================================
 
 function invoicePayload({
@@ -195,19 +211,21 @@ function invoicePayload({
                 total_amount: amount,
                 devise: 'XOF',
                 description,
-                customer: phone,
+
+                // Ne pas filtrer les moyens de paiement
+                // à partir du numéro du client.
+                customer: '',
+
                 customer_firstname: 'Client',
                 customer_lastname: 'Donko',
-                customer_email:
-                    'client@smarteduafrica.com',
+                customer_email: 'client@smarteduafrica.com',
                 external_id: orderId,
                 otp: ''
             },
 
             store: {
                 name: 'Donko',
-                website_url:
-                    'https://smarteduafrica.com'
+                website_url: 'https://smarteduafrica.com'
             },
 
             actions: {
@@ -227,7 +245,7 @@ function invoicePayload({
 }
 
 // ==========================================
-// 6. CONFIRMATION DU PAIEMENT
+// 7. CONFIRMATION DU PAIEMENT
 // ==========================================
 
 async function confirmPayment(token) {
@@ -243,7 +261,7 @@ async function confirmPayment(token) {
 }
 
 // ==========================================
-// 7. INITIER UN PAIEMENT
+// 8. INITIER UN PAIEMENT
 // ==========================================
 
 app.post('/initiate-payment', async (req, res) => {
@@ -285,14 +303,12 @@ app.post('/initiate-payment', async (req, res) => {
         amountNum < MIN_AMOUNT
     ) {
         return res.status(400).json({
-            error:
-                `Montant minimum : ${MIN_AMOUNT} FCFA`,
+            error: `Montant minimum : ${MIN_AMOUNT} FCFA`,
             minimum: MIN_AMOUNT
         });
     }
 
-    const formattedPhone =
-        formatPhoneNumber(phone);
+    const formattedPhone = formatPhoneNumber(phone);
 
     if (!/^223\d{8}$/.test(formattedPhone)) {
         return res.status(400).json({
@@ -301,12 +317,7 @@ app.post('/initiate-payment', async (req, res) => {
     }
 
     if (
-        ![
-            'donks',
-            'premium',
-            'library',
-            'group'
-        ].includes(type)
+        !['donks', 'premium', 'library', 'group'].includes(type)
     ) {
         return res.status(400).json({
             error: 'Type de paiement non pris en charge.'
@@ -331,34 +342,26 @@ app.post('/initiate-payment', async (req, res) => {
 
             if (!match) {
                 return res.status(401).json({
-                    error:
-                        'Connexion requise pour recharger.'
+                    error: 'Connexion requise pour recharger.'
                 });
             }
 
             let decoded;
 
             try {
-                decoded =
-                    await admin.auth().verifyIdToken(
-                        match[1]
-                    );
+                decoded = await admin.auth().verifyIdToken(match[1]);
             } catch {
                 return res.status(401).json({
-                    error:
-                        'Session Firebase invalide ou expirée.'
+                    error: 'Session Firebase invalide ou expirée.'
                 });
             }
 
             // UID récupéré depuis Firebase.
             verifiedUid = decoded.uid;
 
-            // Montant libre :
             // 1 FCFA = 1 Donk.
             creditsToAdd = amountNum;
-
-            productTitle =
-                `${creditsToAdd} Donks`;
+            productTitle = `${creditsToAdd} Donks`;
 
         } else {
             if (
@@ -370,14 +373,8 @@ app.post('/initiate-payment', async (req, res) => {
                 });
             }
 
-            if (
-                type === 'library' ||
-                type === 'group'
-            ) {
-                if (
-                    !itemId ||
-                    typeof itemId !== 'string'
-                ) {
+            if (type === 'library' || type === 'group') {
+                if (!itemId || typeof itemId !== 'string') {
                     return res.status(400).json({
                         error:
                             'Identifiant du produit/groupe manquant.'
@@ -395,20 +392,17 @@ app.post('/initiate-payment', async (req, res) => {
 
                 if (!snap.exists) {
                     return res.status(404).json({
-                        error:
-                            'Produit ou groupe introuvable.'
+                        error: 'Produit ou groupe introuvable.'
                     });
                 }
 
                 const data = snap.data();
 
-                sellerId =
-                    type === 'library'
-                        ? data.sellerId || null
-                        : data.teacherId || null;
+                sellerId = type === 'library'
+                    ? data.sellerId || null
+                    : data.teacherId || null;
 
-                productTitle =
-                    data.title || '';
+                productTitle = data.title || '';
 
                 productPrice = Number(
                     type === 'library'
@@ -437,7 +431,6 @@ app.post('/initiate-payment', async (req, res) => {
             .collection('purchases')
             .doc(orderId);
 
-        // Réservation atomique de l'identifiant.
         try {
             await purchaseRef.create({
                 uid: verifiedUid,
@@ -459,8 +452,7 @@ app.post('/initiate-payment', async (req, res) => {
                 e.code === 'already-exists'
             ) {
                 return res.status(409).json({
-                    error:
-                        'Cette commande existe déjà.',
+                    error: 'Cette commande existe déjà.',
                     orderId
                 });
             }
@@ -470,14 +462,8 @@ app.post('/initiate-payment', async (req, res) => {
 
         const start = new Date();
 
-        const end = [
-            'premium',
-            'group'
-        ].includes(type)
-            ? new Date(
-                start.getTime() +
-                365 * 86400000
-            )
+        const end = ['premium', 'group'].includes(type)
+            ? new Date(start.getTime() + 365 * 86400000)
             : null;
 
         // ==================================
@@ -509,29 +495,24 @@ app.post('/initiate-payment', async (req, res) => {
             );
 
             const data = response.data;
-
-            // Correction du problème response_text.
             const url = paymentUrl(data);
 
             if (
-                data?.response_code !== '00' ||
+                String(data?.response_code) !== '00' ||
                 !data?.token ||
                 !url
             ) {
                 await purchaseRef.update({
                     status: 'initiation_failed',
                     initiationResponseCode:
-                        String(
-                            data?.response_code || ''
-                        ),
+                        String(data?.response_code || ''),
                     updatedAt: stamp()
                 });
 
                 return res.status(502).json({
                     error:
                         'LigdiCash n’a pas fourni une facture et un lien de paiement valides.',
-                    responseCode:
-                        data?.response_code || null
+                    responseCode: data?.response_code || null
                 });
             }
 
@@ -540,19 +521,15 @@ app.post('/initiate-payment', async (req, res) => {
                 token: data.token,
                 paymentUrl: url,
                 startDate:
-                    admin.firestore.Timestamp.fromDate(
-                        start
-                    ),
+                    admin.firestore.Timestamp.fromDate(start),
                 endDate: end
-                    ? admin.firestore.Timestamp.fromDate(
-                        end
-                    )
+                    ? admin.firestore.Timestamp.fromDate(end)
                     : null,
                 updatedAt: stamp()
             });
 
-            // Retourne les deux noms de champs
-            // pour faciliter la compatibilité HTML.
+            // Les deux champs de lien sont conservés
+            // pour la compatibilité avec le site de recharge.
             return res.json({
                 response_code: '00',
                 response_text: url,
@@ -565,8 +542,7 @@ app.post('/initiate-payment', async (req, res) => {
             await purchaseRef.update({
                 status: 'initiation_unknown',
                 updatedAt: stamp(),
-                initiationError:
-                    String(e.message).slice(0, 300)
+                initiationError: String(e.message).slice(0, 300)
             }).catch(() => {});
 
             console.error(
@@ -582,20 +558,16 @@ app.post('/initiate-payment', async (req, res) => {
         }
 
     } catch (e) {
-        console.error(
-            'Initialisation :',
-            e.message
-        );
+        console.error('Initialisation :', e.message);
 
         return res.status(500).json({
-            error:
-                'Échec de l’initialisation du paiement.'
+            error: 'Échec de l’initialisation du paiement.'
         });
     }
 });
 
 // ==========================================
-// 8. TRAITEMENT DU PAIEMENT CONFIRMÉ
+// 9. TRAITEMENT DU PAIEMENT CONFIRMÉ
 // ==========================================
 
 async function settlePayment(orderId) {
@@ -603,10 +575,7 @@ async function settlePayment(orderId) {
         return { status: 'invalid' };
     }
 
-    const payRef = db
-        .collection('purchases')
-        .doc(orderId);
-
+    const payRef = db.collection('purchases').doc(orderId);
     const snap = await payRef.get();
 
     if (!snap.exists) {
@@ -624,8 +593,7 @@ async function settlePayment(orderId) {
     }
 
     // Vérification indépendante auprès de LigdiCash.
-    const confirmation =
-        await confirmPayment(pay.token);
+    const confirmation = await confirmPayment(pay.token);
 
     const status = String(
         confirmation?.status || ''
@@ -633,11 +601,7 @@ async function settlePayment(orderId) {
 
     if (status !== 'completed') {
         if (
-            [
-                'notcompleted',
-                'failed',
-                'cancelled'
-            ].includes(status)
+            ['notcompleted', 'failed', 'cancelled'].includes(status)
         ) {
             await payRef.update({
                 status: 'notcompleted',
@@ -645,9 +609,7 @@ async function settlePayment(orderId) {
             });
         }
 
-        return {
-            status: status || 'unknown'
-        };
+        return { status: status || 'unknown' };
     }
 
     // ==================================
@@ -662,16 +624,11 @@ async function settlePayment(orderId) {
             .doc('main');
 
         await db.runTransaction(async tx => {
-            const current =
-                await tx.get(payRef);
-
-            const wallet =
-                await tx.get(walletRef);
+            const current = await tx.get(payRef);
+            const wallet = await tx.get(walletRef);
 
             if (!current.exists) {
-                throw new Error(
-                    'Commande absente.'
-                );
+                throw new Error('Commande absente.');
             }
 
             const p = current.data();
@@ -684,42 +641,32 @@ async function settlePayment(orderId) {
                 return;
             }
 
-            const credits =
-                Number(p.creditsToAdd);
+            const credits = Number(p.creditsToAdd);
 
             if (
                 !Number.isSafeInteger(credits) ||
                 credits < MIN_AMOUNT ||
                 credits !== Number(p.amount)
             ) {
-                throw new Error(
-                    'Montant Donks incohérent.'
-                );
+                throw new Error('Montant Donks incohérent.');
             }
 
             const balance = wallet.exists
-                ? Number(
-                    wallet.data().credits || 0
-                )
+                ? Number(wallet.data().credits || 0)
                 : 0;
 
             if (
                 !Number.isSafeInteger(balance) ||
                 balance < 0 ||
-                !Number.isSafeInteger(
-                    balance + credits
-                )
+                !Number.isSafeInteger(balance + credits)
             ) {
-                throw new Error(
-                    'Solde invalide.'
-                );
+                throw new Error('Solde invalide.');
             }
 
             tx.set(
                 walletRef,
                 {
-                    credits:
-                        balance + credits,
+                    credits: balance + credits,
                     updatedAt: stamp()
                 },
                 { merge: true }
@@ -739,13 +686,11 @@ async function settlePayment(orderId) {
 
     } else if (pay.type === 'premium') {
         await db.runTransaction(async tx => {
-            const current =
-                await tx.get(payRef);
+            const current = await tx.get(payRef);
 
             if (
                 !current.exists ||
-                current.data().status ===
-                    'completed'
+                current.data().status === 'completed'
             ) {
                 return;
             }
@@ -756,17 +701,12 @@ async function settlePayment(orderId) {
             });
 
             tx.set(
-                db.collection('users').doc(
-                    pay.uid
-                ),
+                db.collection('users').doc(pay.uid),
                 {
                     isPremium: true,
-                    premiumStartDate:
-                        pay.startDate,
-                    premiumEndDate:
-                        pay.endDate,
-                    premiumOrderId:
-                        orderId
+                    premiumStartDate: pay.startDate,
+                    premiumEndDate: pay.endDate,
+                    premiumOrderId: orderId
                 },
                 { merge: true }
             );
@@ -776,29 +716,17 @@ async function settlePayment(orderId) {
     // ACHAT GROUPE
     // ==================================
 
-    } else if (
-        pay.type === 'group' &&
-        pay.itemId
-    ) {
-        const memberRef = db
-            .collection('group_members')
-            .doc(orderId);
-
-        const groupRef = db
-            .collection('groups')
-            .doc(pay.itemId);
+    } else if (pay.type === 'group' && pay.itemId) {
+        const memberRef = db.collection('group_members').doc(orderId);
+        const groupRef = db.collection('groups').doc(pay.itemId);
 
         await db.runTransaction(async tx => {
-            const current =
-                await tx.get(payRef);
-
-            const member =
-                await tx.get(memberRef);
+            const current = await tx.get(payRef);
+            const member = await tx.get(memberRef);
 
             if (
                 !current.exists ||
-                current.data().status ===
-                    'completed'
+                current.data().status === 'completed'
             ) {
                 return;
             }
@@ -810,19 +738,15 @@ async function settlePayment(orderId) {
                     status: 'active',
                     purchaseId: orderId,
                     joinedAt: stamp(),
-                    expiresAt:
-                        pay.endDate,
-                    paymentAmount:
-                        pay.amount
+                    expiresAt: pay.endDate,
+                    paymentAmount: pay.amount
                 });
 
                 tx.set(
                     groupRef,
                     {
                         membersCount:
-                            admin.firestore.FieldValue.increment(
-                                1
-                            )
+                            admin.firestore.FieldValue.increment(1)
                     },
                     { merge: true }
                 );
@@ -840,13 +764,11 @@ async function settlePayment(orderId) {
 
     } else if (pay.type === 'library') {
         await db.runTransaction(async tx => {
-            const current =
-                await tx.get(payRef);
+            const current = await tx.get(payRef);
 
             if (
                 !current.exists ||
-                current.data().status ===
-                    'completed'
+                current.data().status === 'completed'
             ) {
                 return;
             }
@@ -858,21 +780,18 @@ async function settlePayment(orderId) {
         });
 
     } else {
-        // Les commandes de test ne donnent
-        // aucun droit ni crédit.
+        // Les commandes de test ne donnent aucun droit ni crédit.
         await payRef.update({
             status: 'completed',
             confirmedAt: stamp()
         });
     }
 
-    return {
-        status: 'completed'
-    };
+    return { status: 'completed' };
 }
 
 // ==========================================
-// 9. WEBHOOK PAIEMENT
+// 10. WEBHOOK PAIEMENT
 // ==========================================
 
 app.post('/webhook', async (req, res) => {
@@ -881,8 +800,7 @@ app.post('/webhook', async (req, res) => {
 
     try {
         await saveCallbackLog({
-            receivedAt:
-                new Date().toISOString(),
+            receivedAt: new Date().toISOString(),
             method: req.method,
             path: req.originalUrl,
             ip: req.ip,
@@ -896,25 +814,18 @@ app.post('/webhook', async (req, res) => {
         const body = req.body || {};
 
         const orderId =
-            extractCustom(
-                body.custom_data,
-                'transaction_id'
-            ) ||
+            extractCustom(body.custom_data, 'transaction_id') ||
             body.external_id;
 
         if (!orderId) {
-            console.warn(
-                'Webhook sans orderId'
-            );
+            console.warn('Webhook sans orderId');
             return;
         }
 
         console.log(
             'Résultat webhook :',
             orderId,
-            await settlePayment(
-                String(orderId)
-            )
+            await settlePayment(String(orderId))
         );
 
     } catch (e) {
@@ -926,7 +837,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==========================================
-// 10. CALLBACKS SUPPLÉMENTAIRES
+// 11. CALLBACKS SUPPLÉMENTAIRES
 // ==========================================
 
 const CALLBACK_PATHS = [
@@ -942,14 +853,12 @@ app.all(CALLBACK_PATHS, async (req, res) => {
     res.status(200).json({
         status: 'ok',
         received: true,
-        timestamp:
-            new Date().toISOString(),
+        timestamp: new Date().toISOString(),
         path: req.originalUrl
     });
 
     await saveCallbackLog({
-        receivedAt:
-            new Date().toISOString(),
+        receivedAt: new Date().toISOString(),
         method: req.method,
         path: req.originalUrl,
         ip: req.ip,
@@ -962,47 +871,32 @@ app.all(CALLBACK_PATHS, async (req, res) => {
 });
 
 // ==========================================
-// 11. CONSULTATION DES CALLBACKS
+// 12. CONSULTATION DES CALLBACKS
 // ==========================================
 
 app.get('/callbacks', (req, res) => {
     if (
         !CALLBACK_VIEW_TOKEN ||
-        req.query.token !==
-            CALLBACK_VIEW_TOKEN
+        req.query.token !== CALLBACK_VIEW_TOKEN
     ) {
         return res.status(403).json({
             error: 'Token invalide.'
         });
     }
 
-    const n = Number.parseInt(
-        req.query.limit || '20',
-        10
-    );
-
+    const n = Number.parseInt(req.query.limit || '20', 10);
     let logs = callbackLogs;
 
-    if (
-        req.query.order_id ||
-        req.query.orderId
-    ) {
+    if (req.query.order_id || req.query.orderId) {
         logs = logs.filter(x =>
             JSON.stringify(x).includes(
-                String(
-                    req.query.order_id ||
-                    req.query.orderId
-                )
+                String(req.query.order_id || req.query.orderId)
             )
         );
     }
 
     if (req.query.source) {
-        logs = logs.filter(
-            x =>
-                x.source ===
-                req.query.source
-        );
+        logs = logs.filter(x => x.source === req.query.source);
     }
 
     res.json({
@@ -1010,57 +904,43 @@ app.get('/callbacks', (req, res) => {
         callbacks: logs.slice(
             0,
             Number.isFinite(n)
-                ? Math.max(
-                    1,
-                    Math.min(n, 200)
-                )
+                ? Math.max(1, Math.min(n, 200))
                 : 20
         ),
-        serverTime:
-            new Date().toISOString()
+        serverTime: new Date().toISOString()
     });
 });
 
 // ==========================================
-// 12. TEST DU LIEN DE PAIEMENT
+// 13. TEST DU LIEN DE PAIEMENT
 // ==========================================
 
 app.post('/test/payment-link', async (req, res) => {
     const {
         phone,
         amount = 10,
-        description =
-            'Test de validation LigdiCash'
+        description = 'Test de validation LigdiCash'
     } = req.body || {};
 
-    const amountNum =
-        Number(amount);
-
-    const formattedPhone =
-        formatPhoneNumber(phone);
+    const amountNum = Number(amount);
+    const formattedPhone = formatPhoneNumber(phone);
 
     if (
         !Number.isSafeInteger(amountNum) ||
         amountNum < MIN_AMOUNT
     ) {
         return res.status(400).json({
-            error:
-                `Montant minimum : ${MIN_AMOUNT} FCFA`
+            error: `Montant minimum : ${MIN_AMOUNT} FCFA`
         });
     }
 
-    if (
-        !/^223\d{8}$/.test(
-            formattedPhone
-        )
-    ) {
+    if (!/^223\d{8}$/.test(formattedPhone)) {
         return res.status(400).json({
             error: 'Numéro malien invalide.'
         });
     }
 
-    const orderId =
-        `TEST-${Date.now()}`;
+    const orderId = `TEST-${Date.now()}`;
 
     try {
         const response = await axios.post(
@@ -1081,43 +961,35 @@ app.post('/test/payment-link', async (req, res) => {
         );
 
         const data = response.data;
-
         const url = paymentUrl(data);
 
         if (
-            data?.response_code !== '00' ||
+            String(data?.response_code) !== '00' ||
             !data?.token ||
             !url
         ) {
             return res.status(502).json({
-                error:
-                    'Facture de test non créée.',
-                responseCode:
-                    data?.response_code || null
+                error: 'Facture de test non créée.',
+                responseCode: data?.response_code || null
             });
         }
 
-        await db
-            .collection('purchases')
-            .doc(orderId)
-            .create({
-                uid: 'test-validation',
-                phone: formattedPhone,
-                type: 'test',
-                itemId: 'test',
-                sellerId: null,
-                productTitle:
-                    'Test validation',
-                productPrice:
-                    amountNum,
-                amount: amountNum,
-                status: 'pending',
-                token: data.token,
-                orderId,
-                createdAt: stamp()
-            });
+        await db.collection('purchases').doc(orderId).create({
+            uid: 'test-validation',
+            phone: formattedPhone,
+            type: 'test',
+            itemId: 'test',
+            sellerId: null,
+            productTitle: 'Test validation',
+            productPrice: amountNum,
+            amount: amountNum,
+            status: 'pending',
+            token: data.token,
+            orderId,
+            createdAt: stamp()
+        });
 
-        res.json({
+        return res.json({
             orderId,
             amount: amountNum,
             response_code: '00',
@@ -1132,15 +1004,14 @@ app.post('/test/payment-link', async (req, res) => {
             e.response?.data || e.message
         );
 
-        res.status(502).json({
-            error:
-                'Erreur lors du test.'
+        return res.status(502).json({
+            error: 'Erreur lors du test.'
         });
     }
 });
 
 // ==========================================
-// 13. RETRAITS MARCHANDS
+// 14. RETRAITS MARCHANDS
 // TEMPORAIREMENT DÉSACTIVÉS
 // ==========================================
 
@@ -1157,7 +1028,7 @@ app.post('/process-withdrawal', (req, res) => {
 });
 
 // ==========================================
-// 14. WEBHOOK RETRAIT
+// 15. WEBHOOK RETRAIT
 // ==========================================
 
 app.post('/webhook-withdrawal', async (req, res) => {
@@ -1165,8 +1036,7 @@ app.post('/webhook-withdrawal', async (req, res) => {
 
     try {
         await saveCallbackLog({
-            receivedAt:
-                new Date().toISOString(),
+            receivedAt: new Date().toISOString(),
             method: req.method,
             path: req.originalUrl,
             ip: req.ip,
@@ -1177,10 +1047,7 @@ app.post('/webhook-withdrawal', async (req, res) => {
             source: 'withdrawal_webhook'
         });
     } catch (e) {
-        console.error(
-            'Webhook retrait :',
-            e.message
-        );
+        console.error('Webhook retrait :', e.message);
     }
 
     // Ne jamais déclarer un retrait payé
@@ -1188,16 +1055,14 @@ app.post('/webhook-withdrawal', async (req, res) => {
 });
 
 // ==========================================
-// 15. ROUTE DE SANTÉ
+// 16. ROUTE DE SANTÉ
 // ==========================================
 
 app.get('/', (req, res) => {
     res.json({
         status: 'ok',
-        service:
-            'LigdiCash Donko API',
-        version:
-            '7.0 - montant libre',
+        service: 'LigdiCash Donko API',
+        version: '7.0 - montant libre',
 
         endpoints: [
             'POST /initiate-payment',
@@ -1209,26 +1074,21 @@ app.get('/', (req, res) => {
         ],
 
         config: {
-            minAmount:
-                `${MIN_AMOUNT} FCFA`,
-            donksRecharge:
-                'Montant libre',
-            callbackViewEnabled:
-                Boolean(CALLBACK_VIEW_TOKEN),
+            minAmount: `${MIN_AMOUNT} FCFA`,
+            donksRecharge: 'Montant libre',
+            callbackViewEnabled: Boolean(CALLBACK_VIEW_TOKEN),
             firestoreLogs: true
         },
 
-        timestamp:
-            new Date().toISOString()
+        timestamp: new Date().toISOString()
     });
 });
 
 // ==========================================
-// 16. DÉMARRAGE
+// 17. DÉMARRAGE
 // ==========================================
 
-const PORT =
-    process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
     console.log(
